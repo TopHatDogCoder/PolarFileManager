@@ -5,6 +5,13 @@ import subprocess
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+# Optional: use send2trash if available to move deletions to the system Trash/Recycle Bin
+try:
+    from send2trash import send2trash
+    _HAVE_SEND2TRASH = True
+except Exception:
+    _HAVE_SEND2TRASH = False
+
 app = tk.Tk()
 app.title("Polar File Manager")
 app.geometry("700x500")
@@ -30,12 +37,13 @@ history_back = []
 history_forward = []
 current_dir = ""
 
+
 def get_file_details(item_name, is_dir):
     if is_dir:
         return "📁 " + item_name, "Folder"
-    
+
     ext = os.path.splitext(item_name)[1].lower()
-    
+
     type_mapping = {
         ".py": ("🐍 " + item_name, "Python Script"),
         ".sh": ("🐚 " + item_name, "Shell Script"),
@@ -57,28 +65,51 @@ def get_file_details(item_name, is_dir):
         ".html": ("🌐 " + item_name, "HTML Document"),
         ".json": ("⚙️ " + item_name, "JSON Data")
     }
-    
+
     return type_mapping.get(ext, ("📄 " + item_name, f"{ext[1:].upper() if ext else 'Unknown'} File"))
 
+
 def load_files(folder_path):
+    """Load the directory listing using os.scandir (more efficient) and sort by name.
+    Handles permission and not-found errors gracefully.
+    """
     global current_dir
     current_dir = folder_path
     path_var.set(folder_path)
-    
+
+    # clear the tree
     for row in file_tree.get_children():
         file_tree.delete(row)
-        
+
     try:
-        for item in os.listdir(folder_path):
-            item_path = os.path.join(folder_path, item)
-            is_dir = os.path.isdir(item_path)
-            
-            display_name, item_type = get_file_details(item, is_dir)
-            file_tree.insert("", "end", values=(display_name, item_type), tags=(item_path,))
+        with os.scandir(folder_path) as it:
+            entries = sorted(it, key=lambda e: e.name.lower())
+            for entry in entries:
+                try:
+                    item_path = entry.path
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    display_name, item_type = get_file_details(entry.name, is_dir)
+                    file_tree.insert("", "end", values=(display_name, item_type), tags=(item_path,))
+                except PermissionError:
+                    # skip entries we don't have permission to inspect
+                    continue
+    except PermissionError:
+        messagebox.showerror("Permission Denied", f"Cannot access: {folder_path}")
+    except FileNotFoundError:
+        messagebox.showerror("Not Found", f"Folder not found: {folder_path}")
     except Exception as e:
-        print(f"Error: {e}")
-        
+        # fallback to os.listdir in the unlikely event scandir fails
+        try:
+            for item in sorted(os.listdir(folder_path), key=lambda s: s.lower()):
+                item_path = os.path.join(folder_path, item)
+                is_dir = os.path.isdir(item_path)
+                display_name, item_type = get_file_details(item, is_dir)
+                file_tree.insert("", "end", values=(display_name, item_type), tags=(item_path,))
+        except Exception:
+            messagebox.showerror("Error", f"Error listing {folder_path}: {e}")
+
     update_buttons()
+
 
 def browse_folder():
     global history_back, history_forward
@@ -89,12 +120,14 @@ def browse_folder():
             history_forward.clear()
         load_files(selected_folder)
 
+
 def go_back():
     global history_back, history_forward
     if history_back:
         history_forward.append(current_dir)
         prev_dir = history_back.pop()
         load_files(prev_dir)
+
 
 def go_forward():
     global history_back, history_forward
@@ -103,44 +136,48 @@ def go_forward():
         next_dir = history_forward.pop()
         load_files(next_dir)
 
+
 def update_buttons():
     back_btn.configure(state="normal" if history_back else "disabled")
     forward_btn.configure(state="normal" if history_forward else "disabled")
 
+
 def rename_item():
-    selected_item = file_tree.selection()
-    if not selected_item:
+    sel = file_tree.selection()
+    if not sel:
         return
+    selected_item = sel[0]
+
     old_path = file_tree.item(selected_item, "tags")[0]
     old_name = os.path.basename(old_path)
-    
+
     dialog = tk.Toplevel(app)
     dialog.title("Rename")
     dialog.geometry("350x130")
     dialog.resizable(False, False)
     dialog.transient(app)
     dialog.grab_set()
-    
+
     try:
         dialog.iconbitmap(default="")
     except Exception:
         pass
-        
+
     frame = ttk.Frame(dialog, padding=15)
     frame.pack(fill="both", expand=True)
-    
+
     label = ttk.Label(frame, text=f"Enter new name for '{old_name}':")
     label.pack(fill="x", anchor="w", pady=(0, 5))
-    
+
     entry_var = tk.StringVar(value=old_name)
     entry = ttk.Entry(frame, textvariable=entry_var)
     entry.pack(fill="x", pady=(0, 15))
     entry.select_range(0, tk.END)
     entry.focus()
-    
+
     btn_frame = ttk.Frame(frame)
     btn_frame.pack(anchor="e")
-    
+
     def on_confirm():
         new_name = entry_var.get().strip()
         if new_name and new_name != old_name:
@@ -151,38 +188,50 @@ def rename_item():
             except Exception as e:
                 messagebox.showerror("Error", f"Could not rename item: {e}")
         dialog.destroy()
-        
+
     def on_cancel():
         dialog.destroy()
-        
+
     ok_btn = ttk.Button(btn_frame, text="OK", command=on_confirm, width=10)
     ok_btn.pack(side="left", padx=2)
-    
+
     cancel_btn = ttk.Button(btn_frame, text="Cancel", command=on_cancel, width=10)
     cancel_btn.pack(side="left", padx=2)
-    
+
     dialog.bind("<Return>", lambda e: on_confirm())
     dialog.bind("<Escape>", lambda e: on_cancel())
-    
+
     app.wait_window(dialog)
 
+
 def delete_item():
-    selected_item = file_tree.selection()
-    if not selected_item:
+    sel = file_tree.selection()
+    if not sel:
         return
+    selected_item = sel[0]
+
     item_path = file_tree.item(selected_item, "tags")[0]
     item_name = os.path.basename(item_path)
-    
-    confirm = messagebox.askyesno("Delete", f"Are you sure you want to permanently delete '{item_name}'?")
+
+    # Be explicit: warn the user this is permanent unless send2trash is available
+    if _HAVE_SEND2TRASH:
+        confirm = messagebox.askyesno("Delete", f"Move '{item_name}' to Trash/Recycle Bin?")
+    else:
+        confirm = messagebox.askyesno("Delete", f"Are you sure you want to permanently delete '{item_name}'? This will NOT go to Trash.")
+
     if confirm:
         try:
-            if os.path.isdir(item_path):
-                shutil.rmtree(item_path)
+            if _HAVE_SEND2TRASH:
+                send2trash(item_path)
             else:
-                os.remove(item_path)
+                if os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+                else:
+                    os.remove(item_path)
             load_files(current_dir)
         except Exception as e:
             messagebox.showerror("Error", f"Could not delete item: {e}")
+
 
 def show_context_menu(event):
     item = file_tree.identify_row(event.y)
@@ -190,14 +239,15 @@ def show_context_menu(event):
         file_tree.selection_set(item)
         context_menu.post(event.x_root, event.y_root)
 
+
 def on_double_click(event):
-    global history_back, history_forward
-    selected_item = file_tree.selection()
-    if not selected_item:
+    sel = file_tree.selection()
+    if not sel:
         return
-        
+    selected_item = sel[0]
+
     item_path = file_tree.item(selected_item, "tags")[0]
-    
+
     if os.path.isdir(item_path):
         history_back.append(current_dir)
         history_forward.clear()
@@ -212,10 +262,12 @@ def on_double_click(event):
                 subprocess.check_call(["xdg-open", item_path])
         except Exception:
             messagebox.showwarning(
-                "No Association Found", 
+                "No Association Found",
                 f"No application is associated with this file type.\n\nFile: {os.path.basename(item_path)}"
             )
 
+
+# UI layout
 top_frame = ttk.Frame(app, padding=10)
 top_frame.pack(fill="x")
 
@@ -235,7 +287,8 @@ path_entry.pack(side="left", padx=5, fill="x", expand=True)
 tree_frame = ttk.Frame(app, padding=10)
 tree_frame.pack(fill="both", expand=True)
 
-file_tree = ttk.Treeview(tree_frame, columns=("Name", "Type"), show="headings")
+# Single-selection browse mode to avoid confusion with multi-selection
+file_tree = ttk.Treeview(tree_frame, columns=("Name", "Type"), show="headings", selectmode="browse")
 file_tree.heading("Name", text="Name")
 file_tree.heading("Type", text="Type")
 file_tree.column("Name", width=450)
